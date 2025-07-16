@@ -1,6 +1,6 @@
 # a2fetch
 
-**a2fetch** is a lightweight wrapper around `aria2c` for efficiently downloading files from a list of HTTP(S) or pre-signed URLs.
+**a2fetch** is a lightweight wrapper around `aria2` for efficiently downloading files from a list of HTTP(S) or pre-signed URLs.
 
 It is designed for simple use cases where large numbers of files need to be fetched in parallel, especially from cloud object storage (e.g., AWS S3 pre-signed URLs).
 
@@ -8,12 +8,12 @@ It is designed for simple use cases where large numbers of files need to be fetc
 
 - Accepts text files with URLs or single HTTPS URLs
 - Automatically detects and handles pre-signed URLs
-- Downloads files using `aria2c` with sensible defaults
+- Downloads files using `aria2` with sensible defaults
 - Supports parallel downloads, resume, and directory flattening
 
 ## Installation
 
-Clone the repository and ensure `aria2c` is installed on your system:
+Clone the repository and ensure `aria2` is installed on your system:
 
 ```bash
 git clone https://github.com/EOX-A/a2fetch.git
@@ -53,7 +53,7 @@ Or directly with a single HTTPS URL:
 
 ## Requirements
 
-`aria2c` must be installed and available in your $PATH
+`aria2` must be installed and available in your $PATH
 
 ## Caution
 
