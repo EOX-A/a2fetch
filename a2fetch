@@ -2,74 +2,98 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <input-file-with-presigned-urls | single-presigned-url> <output-dir>"
+  echo "Usage: $0 <input-file-with-presigned-urls | single-presigned-url> <output-dir> [base-url]"
+  echo "  If base-url is provided, output paths preserve directory structure relative to it."
   exit 1
 }
 
-if [ $# -ne 2 ]; then
+if [[ $# -lt 2 || $# -gt 3 ]]; then
   usage
 fi
 
 INPUT="$1"
 OUTPUT_DIR="$2"
+BASE_URL="${3:-}"
+
 mkdir -p "$OUTPUT_DIR"
 
 MAX_CONCURRENT_DOWNLOADS=6
 TMP_ARIA2_INPUT="$(mktemp)"
-TMP_DIR_LIST="$(mktemp)"
 
-# Handle single URL input
+# Check input existence or treat as single URL
 if [[ "$INPUT" =~ ^https?:// ]]; then
   echo "$INPUT" > "$TMP_ARIA2_INPUT.urltmp"
   INPUT="$TMP_ARIA2_INPUT.urltmp"
+else
+  if [[ ! -f "$INPUT" ]]; then
+    echo "[ERROR] Input file '$INPUT' does not exist."
+    exit 1
+  fi
 fi
 
-# Count URLs for warning
-URL_COUNT=0
-if [[ -f "$INPUT" ]]; then
-  # Count non-empty, non-comment lines
-  URL_COUNT=$(grep -v -e '^#' -e '^$' "$INPUT" | wc -l)
-fi
-
+# Count lines for warning
+URL_COUNT=$(grep -cvE '^\s*($|#)' "$INPUT" || true)
 if (( URL_COUNT > 100000 )); then
   echo "[WARNING] Input file contains $URL_COUNT URLs. Parsing and directory creation may take a long time."
 fi
 
-echo "[INFO] Parsing input..."
-while IFS= read -r url; do
-  [[ -z "$url" || "$url" =~ ^# ]] && continue
+echo "[INFO] Parsing URLs and preparing directories..."
 
-  # Extract relative path after domain (before query string)
-  path=$(echo "$url" | sed -E 's|https?://[^/]+/([^?]+).*|\1|')
-  out_path="$OUTPUT_DIR/$path"
-  out_dir=$(dirname "$out_path")
+awk_script='
+{
+  # Remove leading/trailing spaces
+  gsub(/^[ \t]+|[ \t]+$/, "", $0)
+  # Skip empty or comment lines
+  if ($0 ~ /^#/ || length($0) == 0) next
+  url=$0
+  # Strip query string for filename
+  split(url, a, "?")
+  filename=a[1]
+  n=split(filename, parts, "/")
+  file=parts[n]
+  # Determine path to preserve directory structure relative to BASE_URL
+  if (baseurl != "") {
+    sub(baseurl, "", url)
+    sub(/^\//, "", url)
+    out_path=output_dir "/" url
+  } else {
+    out_path=output_dir "/" file
+  }
+  # Get directory path
+  dir=out_path
+  sub(/[^\/]+$/, "", dir)
+  print url "\t" dir "\t" file
+}'
 
-  echo "$out_dir" >> "$TMP_DIR_LIST"
+export BASE_URL
+export OUTPUT_DIR
 
+mapfile -t entries < <(awk -v baseurl="$BASE_URL" -v output_dir="$OUTPUT_DIR" "$awk_script" "$INPUT")
+
+# Extract directories, uniq, and create
+echo "[INFO] Creating directories..."
+printf '%s\n' "${entries[@]}" | cut -f2 | sort -u | xargs -P 8 -I{} mkdir -p "{}"
+
+# Prepare aria2 input file
+echo "[INFO] Preparing aria2 input file..."
+: > "$TMP_ARIA2_INPUT"
+for line in "${entries[@]}"; do
+  url=$(echo "$line" | cut -f1)
+  dir=$(echo "$line" | cut -f2)
+  file=$(echo "$line" | cut -f3)
   {
     echo "$url"
-    echo "  out=$(basename "$out_path")"
-    echo "  dir=$out_dir"
+    echo "  dir=$dir"
+    echo "  out=$file"
   } >> "$TMP_ARIA2_INPUT"
-done < "$INPUT"
-echo "[INFO] Input parsed."
+done
 
-echo "[INFO] Creating directories..."
-sort -u "$TMP_DIR_LIST" | xargs -n 100 -P 8 mkdir -p
-echo "[INFO] Directories created."
+echo "[INFO] Starting downloads with aria2c..."
+aria2c --max-concurrent-downloads=$MAX_CONCURRENT_DOWNLOADS --split=1 --auto-file-renaming=false --allow-overwrite=true --retry-wait=3 --max-tries=3 -i "$TMP_ARIA2_INPUT"
 
-rm -f "$TMP_DIR_LIST"
-
-echo "[INFO] Starting downloads..."
-aria2c \
-  --max-concurrent-downloads=$MAX_CONCURRENT_DOWNLOADS \
-  --split=1 \
-  --auto-file-renaming=false \
-  --allow-overwrite=true \
-  --retry-wait=3 \
-  --max-tries=3 \
-  -i "$TMP_ARIA2_INPUT"
-echo "[INFO] Downloads finished."
+echo "[INFO] Download complete."
 
 rm -f "$TMP_ARIA2_INPUT"
-[[ -f "$TMP_ARIA2_INPUT.urltmp" ]] && rm -f "$TMP_ARIA2_INPUT.urltmp"
+if [[ -f "$TMP_ARIA2_INPUT.urltmp" ]]; then
+  rm -f "$TMP_ARIA2_INPUT.urltmp"
+fi

@@ -39,6 +39,12 @@ For text files with URL lists:
 ./a2fetch urls.txt ${OUTPUT_PATH}
 ```
 
+For relative paths with base URL:
+
+```bash
+./a2fetch urls.txt ${OUTPUT_PATH} "https://baseurl.example.com"
+```
+
 Or directly with a single HTTPS URL:
 
 ```bash
