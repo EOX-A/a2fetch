@@ -2,8 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <input-file-with-presigned-urls> <output-dir>"
-  echo "  or:  $0 <single-presigned-url> <output-dir>"
+  echo "Usage: $0 <input-file-with-presigned-urls | single-presigned-url> <output-dir>"
   exit 1
 }
 
@@ -17,63 +16,51 @@ mkdir -p "$OUTPUT_DIR"
 
 MAX_CONCURRENT_DOWNLOADS=6
 TMP_ARIA2_INPUT="$(mktemp)"
-TMP_DIRLIST="$(mktemp)"
+TMP_DIR_LIST="$(mktemp)"
 
+# Handle single URL input
 if [[ "$INPUT" =~ ^https?:// ]]; then
-  echo "[INFO] Single URL mode" >&2
   echo "$INPUT" > "$TMP_ARIA2_INPUT.urltmp"
   INPUT="$TMP_ARIA2_INPUT.urltmp"
-else
-  echo "[INFO] File input mode: $INPUT" >&2
 fi
 
-echo "[INFO] Parsing URLs and collecting directory paths ..." >&2
+# Count URLs for warning
+URL_COUNT=0
+if [[ -f "$INPUT" ]]; then
+  # Count non-empty, non-comment lines
+  URL_COUNT=$(grep -v -e '^#' -e '^$' "$INPUT" | wc -l)
+fi
 
-# Function to parse one URL and echo its output dir
-parse_url_path() {
-  local url="$1"
-  [[ -z "$url" || "$url" =~ ^# ]] && return
-  local rel_path
-  rel_path=$(echo "$url" | sed -E 's|https?://[^/]+/([^?]+).*|\1|' | sed 's|%2F|/|g')
-  local out_path="$OUTPUT_DIR/$rel_path"
-  dirname "$out_path"
-}
+if (( URL_COUNT > 100000 )); then
+  echo "[WARNING] Input file contains $URL_COUNT URLs. Parsing and directory creation may take a long time."
+fi
 
-# Export function for xargs + bash
-export -f parse_url_path
-export OUTPUT_DIR
-
-grep -v '^#' "$INPUT" | grep -v '^$' | xargs -P 8 -I{} bash -c 'parse_url_path "$@"' _ {} \
-  | sort -u > "$TMP_DIRLIST"
-
-echo "[INFO] Done collecting directories." >&2
-echo "[INFO] Creating output directories ..." >&2
-xargs -P 8 -n 1 mkdir -p < "$TMP_DIRLIST"
-echo "[INFO] Done creating directories." >&2
-
-echo "[INFO] Preparing aria2 input file..." >&2
-
+echo "[INFO] Parsing input..."
 while IFS= read -r url; do
   [[ -z "$url" || "$url" =~ ^# ]] && continue
-  rel_path=$(echo "$url" | sed -E 's|https?://[^/]+/([^?]+).*|\1|' | sed 's|%2F|/|g')
-  out_path="$OUTPUT_DIR/$rel_path"
+
+  # Extract relative path after domain (before query string)
+  path=$(echo "$url" | sed -E 's|https?://[^/]+/([^?]+).*|\1|')
+  out_path="$OUTPUT_DIR/$path"
   out_dir=$(dirname "$out_path")
-  out_file=$(basename "$out_path")
+
+  echo "$out_dir" >> "$TMP_DIR_LIST"
 
   {
     echo "$url"
-    echo "  out=$out_file"
+    echo "  out=$(basename "$out_path")"
     echo "  dir=$out_dir"
   } >> "$TMP_ARIA2_INPUT"
 done < "$INPUT"
+echo "[INFO] Input parsed."
 
-echo "[INFO] Done preparing aria2 input file." >&2
+echo "[INFO] Creating directories..."
+sort -u "$TMP_DIR_LIST" | xargs -n 100 -P 8 mkdir -p
+echo "[INFO] Directories created."
 
-[[ -f "$TMP_ARIA2_INPUT.urltmp" ]] && rm -f "$TMP_ARIA2_INPUT.urltmp"
-rm -f "$TMP_DIRLIST"
+rm -f "$TMP_DIR_LIST"
 
-echo "[INFO] Starting downloads with aria2c..." >&2
-
+echo "[INFO] Starting downloads..."
 aria2c \
   --max-concurrent-downloads=$MAX_CONCURRENT_DOWNLOADS \
   --split=1 \
@@ -82,6 +69,7 @@ aria2c \
   --retry-wait=3 \
   --max-tries=3 \
   -i "$TMP_ARIA2_INPUT"
+echo "[INFO] Downloads finished."
 
 rm -f "$TMP_ARIA2_INPUT"
-echo "[INFO] All downloads complete." >&2
+[[ -f "$TMP_ARIA2_INPUT.urltmp" ]] && rm -f "$TMP_ARIA2_INPUT.urltmp"

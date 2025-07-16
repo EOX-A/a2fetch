@@ -23,4 +23,4 @@ sudo cp "$SCRIPT_NAME" "$INSTALL_DIR/"
 sudo chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
 
 echo "✅ $SCRIPT_NAME installed successfully."
-echo "You can now use '$SCRIPT_NAME' from anywhere in your shell_
+echo "You can now use '$SCRIPT_NAME' from anywhere in your shell"
