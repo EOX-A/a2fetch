@@ -17,33 +17,71 @@ mkdir -p "$OUTPUT_DIR"
 
 MAX_CONCURRENT_DOWNLOADS=6
 TMP_ARIA2_INPUT="$(mktemp)"
+TMP_DIRLIST="$(mktemp)"
 
 if [[ "$INPUT" =~ ^https?:// ]]; then
+  echo "[INFO] Single URL mode" >&2
   echo "$INPUT" > "$TMP_ARIA2_INPUT.urltmp"
   INPUT="$TMP_ARIA2_INPUT.urltmp"
+else
+  echo "[INFO] File input mode: $INPUT" >&2
 fi
+
+echo "[INFO] Parsing URLs and collecting directory paths ..." >&2
+
+# Function to parse one URL and echo its output dir
+parse_url_path() {
+  local url="$1"
+  [[ -z "$url" || "$url" =~ ^# ]] && return
+  local rel_path
+  rel_path=$(echo "$url" | sed -E 's|https?://[^/]+/([^?]+).*|\1|' | sed 's|%2F|/|g')
+  local out_path="$OUTPUT_DIR/$rel_path"
+  dirname "$out_path"
+}
+
+# Export function for xargs + bash
+export -f parse_url_path
+export OUTPUT_DIR
+
+grep -v '^#' "$INPUT" | grep -v '^$' | xargs -P 8 -I{} bash -c 'parse_url_path "$@"' _ {} \
+  | sort -u > "$TMP_DIRLIST"
+
+echo "[INFO] Done collecting directories." >&2
+echo "[INFO] Creating output directories ..." >&2
+xargs -P 8 -n 1 mkdir -p < "$TMP_DIRLIST"
+echo "[INFO] Done creating directories." >&2
+
+echo "[INFO] Preparing aria2 input file..." >&2
 
 while IFS= read -r url; do
   [[ -z "$url" || "$url" =~ ^# ]] && continue
-
-  # Extract full path after domain, before query string, preserving directory structure
-  path=$(echo "$url" | sed -E 's|https?://[^/]+/([^?]+).*|\1|')
-  out_path="$OUTPUT_DIR/$path"
+  rel_path=$(echo "$url" | sed -E 's|https?://[^/]+/([^?]+).*|\1|' | sed 's|%2F|/|g')
+  out_path="$OUTPUT_DIR/$rel_path"
   out_dir=$(dirname "$out_path")
-
-  mkdir -p "$out_dir"
+  out_file=$(basename "$out_path")
 
   {
     echo "$url"
-    echo "  out=$(basename "$out_path")"
+    echo "  out=$out_file"
     echo "  dir=$out_dir"
   } >> "$TMP_ARIA2_INPUT"
 done < "$INPUT"
 
-if [[ -f "$TMP_ARIA2_INPUT.urltmp" ]]; then
-  rm -f "$TMP_ARIA2_INPUT.urltmp"
-fi
+echo "[INFO] Done preparing aria2 input file." >&2
 
-aria2c --max-concurrent-downloads=$MAX_CONCURRENT_DOWNLOADS --split=1 --auto-file-renaming=false --allow-overwrite=true --retry-wait=3 --max-tries=3 -i "$TMP_ARIA2_INPUT"
+[[ -f "$TMP_ARIA2_INPUT.urltmp" ]] && rm -f "$TMP_ARIA2_INPUT.urltmp"
+rm -f "$TMP_DIRLIST"
+
+echo "[INFO] Starting downloads with aria2c..." >&2
+
+aria2c \
+  --max-concurrent-downloads=$MAX_CONCURRENT_DOWNLOADS \
+  --split=1 \
+  --auto-file-renaming=false \
+  --allow-overwrite=true \
+  --retry-wait=3 \
+  --max-tries=3 \
+  -i "$TMP_ARIA2_INPUT"
 
 rm -f "$TMP_ARIA2_INPUT"
+echo "[INFO] All downloads complete." >&2
