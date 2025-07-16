@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Usage: $0 <input-file-with-presigned-urls> <output-dir>"
+  echo "  or:  $0 <single-presigned-url> <output-dir>"
+  exit 1
+}
+
+if [ $# -ne 2 ]; then
+  usage
+fi
+
+INPUT="$1"
+OUTPUT_DIR="$2"
+mkdir -p "$OUTPUT_DIR"
+
+MAX_CONCURRENT_DOWNLOADS=6
+TMP_ARIA2_INPUT="$(mktemp)"
+
+if [[ "$INPUT" =~ ^https?:// ]]; then
+  echo "$INPUT" > "$TMP_ARIA2_INPUT.urltmp"
+  INPUT="$TMP_ARIA2_INPUT.urltmp"
+fi
+
+while IFS= read -r url; do
+  [[ -z "$url" || "$url" =~ ^# ]] && continue
+
+  # Extract full path after domain, before query string, preserving directory structure
+  path=$(echo "$url" | sed -E 's|https?://[^/]+/([^?]+).*|\1|')
+  out_path="$OUTPUT_DIR/$path"
+  out_dir=$(dirname "$out_path")
+
+  mkdir -p "$out_dir"
+
+  {
+    echo "$url"
+    echo "  out=$(basename "$out_path")"
+    echo "  dir=$out_dir"
+  } >> "$TMP_ARIA2_INPUT"
+done < "$INPUT"
+
+if [[ -f "$TMP_ARIA2_INPUT.urltmp" ]]; then
+  rm -f "$TMP_ARIA2_INPUT.urltmp"
+fi
+
+aria2c --max-concurrent-downloads=$MAX_CONCURRENT_DOWNLOADS --split=1 --auto-file-renaming=false --allow-overwrite=true --retry-wait=3 --max-tries=3 -i "$TMP_ARIA2_INPUT"
+
+rm -f "$TMP_ARIA2_INPUT"

@@ -1,0 +1,14 @@
+repos:
+  - repo: https://github.com/koalaman/shellcheck-pre-commit
+    rev: v0.10.0
+    hooks:
+      - id: shellcheck
+        additional_dependencies: [bash]
+
+  - repo: https://github.com/pre-commit/mirrors-shfmt
+    rev: v3.7.0
+    hooks:
+      - id: shfmt
+        args: ["-i", "2", "-ci"]
+
+default_stages: [commit]
