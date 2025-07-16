@@ -16,7 +16,7 @@ It is designed for simple use cases where large numbers of files need to be fetc
 Clone the repository and ensure `aria2c` is installed on your system:
 
 ```bash
-git clone https://github.com/youruser/a2fetch.git
+git clone https://github.com/EOX-A/a2fetch.git
 cd a2fetch
 chmod +x a2fetch
 ```
@@ -26,7 +26,7 @@ chmod +x a2fetch
 If you're using a Debian-based system:
 
 ```bash
-curl -O https://your.repo.url/install-debian.sh
+curl -O https://github.com/EOX-A/a2fetch/install-debian.sh
 chmod +x install-debian.sh
 ./install-debian.sh
 ```
