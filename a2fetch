@@ -1,131 +1,417 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage() {
-  echo "Usage: $0 <input-file-with-presigned-urls> <output-dir> [base-url]"
-  echo "  or:  $0 <single-presigned-url> <output-dir> [base-url]"
-  echo
-  echo "If base-url is given, URLs in input file are expected to start with base-url,"
-  echo "and output directory structure is created relative to base-url path."
-  exit 1
+show_help() {
+  cat << "EOF"
+=================================================================
+🚀 a2fetch - EOX Cloudless Parallel Download Engine
+=================================================================
+
+Usage:
+  a2fetch <input-file-with-urls|single-url> [output-dir] [base-url]
+  a2fetch <input-file-with-urls> <base-url> [output-dir]
+  a2fetch -h | --help
+
+Arguments:
+  input-file-with-urls | single-url
+      Path to a text file containing URLs or relative paths (one per line),
+      or a single direct/pre-signed HTTP(S) URL.
+
+  output-dir (optional)
+      Target destination directory where files will be downloaded (default: ./output).
+
+  base-url (optional)
+      Base URL prefix. When provided:
+      - Relative paths in the input file are appended to this base URL.
+      - Full URLs starting with this base URL have the prefix stripped,
+        and paths are created relative to the base URL path.
+
+Environment Variables & Defaults:
+  THREADS / MAX_CONCURRENT_DOWNLOADS
+      Number of parallel download connections in aria2c (-j).
+      Default: 16
+
+  CHUNK_SIZE
+      Number of files per memory chunk batch to avoid OOM on large lists.
+      Default: 50000
+
+  MAX_TRIES
+      Maximum number of retry attempts per file.
+      Default: 6
+
+  RETRY_WAIT
+      Wait time in seconds before retrying a failed download.
+      Default: 3
+
+  DEPTH / KEEP_DEPTH (optional)
+      Keep only the last N directory levels before the filename in output path.
+      - DEPTH=0 : Flatten all files directly into destination directory (no subfolders).
+      - DEPTH=1 : Keep only the immediate parent folder.
+      - DEPTH=2 : Keep the last 2 folder levels.
+
+  CUT_DIRS / STRIP_COMPONENTS (optional)
+      Strip the first N leading directory levels from the URL path.
+      - CUT_DIRS=1 : Strip the first directory level (e.g. S3 bucket name).
+      - CUT_DIRS=2 : Strip the first 2 directory levels.
+
+Path Resolution Logic & Directory Control:
+  Given URL: https://s3.host.com/bucket/folder1/folder2/dataset/tile.tif
+  Target Dir: ./output
+
+  1. Default (Auto-detect):
+     Finds common base directory across all URLs or strips share API prefixes.
+     -> ./output/dataset/tile.tif
+
+  2. DEPTH=1 (Keep last 1 folder level):
+     -> ./output/dataset/tile.tif
+
+  3. DEPTH=2 (Keep last 2 folder levels):
+     -> ./output/folder2/dataset/tile.tif
+
+  4. DEPTH=0 (Flatten all files):
+     -> ./output/tile.tif
+
+  5. CUT_DIRS=1 (Strip first folder / bucket name):
+     -> ./output/folder1/folder2/dataset/tile.tif
+
+  6. BASE_URL="https://s3.host.com/bucket/folder1/":
+     -> ./output/folder2/dataset/tile.tif
+
+Examples:
+  # 1. Download list of full URLs to default directory (./output):
+  a2fetch urls.txt
+
+  # 2. Download list of full URLs to custom directory:
+  a2fetch urls.txt ./downloads
+
+  # 3. Download relative paths using a base URL:
+  a2fetch index.txt ./downloads "https://cloudlessdownloads.eox.at/api/public/dl/28nrhtcj/"
+
+  # 4. Download a single file:
+  a2fetch "https://example.com/path/to/file.tif?sig=123" ./downloads
+
+  # 5. Preserve only the immediate parent folder in output path:
+  DEPTH=1 a2fetch s3_urls.txt ./downloads
+  # -> Saves to: ./downloads/dataset/tile.tif
+
+  # 6. Preserve last 2 parent folders:
+  DEPTH=2 a2fetch s3_urls.txt ./downloads
+  # -> Saves to: ./downloads/folder2/dataset/tile.tif
+
+  # 7. Flatten all files directly into destination directory:
+  DEPTH=0 a2fetch s3_urls.txt ./downloads
+  # -> Saves to: ./downloads/tile.tif
+
+  # 8. Strip the first 2 folder levels from URL path:
+  CUT_DIRS=2 a2fetch s3_urls.txt ./downloads
+
+  # 9. Custom concurrency and memory batching for huge datasets:
+  THREADS=32 CHUNK_SIZE=25000 MAX_TRIES=10 a2fetch index.txt ./downloads
+=================================================================
+EOF
 }
 
-if [[ $# -lt 2 || $# -gt 3 ]]; then
-  usage
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  show_help
+  exit 0
+fi
+
+if [[ $# -lt 1 || $# -gt 3 ]]; then
+  show_help
+  exit 1
 fi
 
 INPUT="$1"
-OUTPUT_DIR="$2"
-BASE_URL="${3:-}"
+arg2="${2:-}"
+arg3="${3:-}"
 
-if [[ -f "$INPUT" ]]; then
-  URL_COUNT=$(grep -cve '^\s*$' -e '^#' "$INPUT" || echo 0)
+# Smart parameter resolution: automatically detect if base-url or output-dir was passed
+DEFAULT_OUTPUT_DIR="./output"
+OUTPUT_DIR=""
+BASE_URL="${BASE_URL:-}"
+
+if [[ -n "$arg2" && -n "$arg3" ]]; then
+  if [[ "$arg2" =~ ^https?:// && ! "$arg3" =~ ^https?:// ]]; then
+    BASE_URL="$arg2"
+    OUTPUT_DIR="$arg3"
+  else
+    OUTPUT_DIR="$arg2"
+    BASE_URL="$arg3"
+  fi
+elif [[ -n "$arg2" ]]; then
+  if [[ "$arg2" =~ ^https?:// ]]; then
+    BASE_URL="$arg2"
+    OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
+  else
+    OUTPUT_DIR="$arg2"
+  fi
 else
-  # Single URL case: just count 1
-  URL_COUNT=1
+  OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
 fi
 
-if [[ $URL_COUNT -gt 100000 ]]; then
-  echo "[WARNING] Input file contains $URL_COUNT URLs. Parsing and directory creation may take a long time."
-fi
+OUTPUT_DIR="${OUTPUT_DIR:-$DEFAULT_OUTPUT_DIR}"
 
-if [[ -f "$INPUT" && ! -r "$INPUT" ]]; then
-  echo "[ERROR] Input file $INPUT not found or not readable."
+# Configuration
+THREADS="${THREADS:-${MAX_CONCURRENT_DOWNLOADS:-16}}"
+CHUNK_SIZE="${CHUNK_SIZE:-50000}"
+CHUNK_LINES=$((CHUNK_SIZE * 3))
+MAX_TRIES="${MAX_TRIES:-6}"
+RETRY_WAIT="${RETRY_WAIT:-3}"
+
+echo "================================================================="
+echo "🚀 EOX Cloudless Parallel Download Engine (a2fetch)"
+echo "================================================================="
+
+# 1. Environment and Prerequisite Checks
+if ! command -v aria2c &>/dev/null; then
+  echo "❌ Error: 'aria2c' is not installed or not in PATH. Please install it first."
   exit 1
 fi
 
+if ! command -v perl &>/dev/null; then
+  echo "❌ Error: 'perl' is required for fast URL processing."
+  exit 1
+fi
+
+# Setup isolated workspace directory and automatic cleanup trap
+TMP_DIR="$(mktemp -d -p "$PWD" .a2fetch_tmp_XXXXXX 2>/dev/null || mktemp -d .a2fetch_tmp_XXXXXX)"
+cleanup() {
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT INT TERM
+
+# Handle single URL vs file input
+if [[ "$INPUT" =~ ^https?:// ]]; then
+  TMP_SINGLE_INPUT="$TMP_DIR/single_url.txt"
+  echo "$INPUT" > "$TMP_SINGLE_INPUT"
+  INPUT_FILE="$TMP_SINGLE_INPUT"
+  TOTAL_FILES=1
+else
+  if [[ ! -f "$INPUT" ]]; then
+    echo "❌ Error: Input file '$INPUT' not found!"
+    exit 1
+  fi
+  if [[ ! -r "$INPUT" ]]; then
+    echo "❌ Error: Input file '$INPUT' is not readable!"
+    exit 1
+  fi
+  INPUT_FILE="$INPUT"
+  echo "🔍 Scanning dataset: $INPUT_FILE..."
+  TOTAL_FILES=$(grep -cve '^\s*$' -e '^\s*#' "$INPUT_FILE" || echo 0)
+fi
+
+echo "📦 Total files detected in list: $TOTAL_FILES"
+echo "📂 Target destination directory: $OUTPUT_DIR"
+if [[ -n "$BASE_URL" ]]; then
+  echo "🌐 Base URL: $BASE_URL"
+fi
+echo "-----------------------------------------------------------------"
+
+if [[ "$TOTAL_FILES" -eq 0 ]]; then
+  echo "ℹ️ No files to download."
+  exit 0
+fi
+
+# Guard against URL being passed as output directory
+if [[ "$OUTPUT_DIR" =~ ^https?:// ]]; then
+  echo "❌ Error: Output directory '$OUTPUT_DIR' cannot be a URL."
+  exit 1
+fi
+
+# Ensure base output directory exists
 mkdir -p "$OUTPUT_DIR"
 
-MAX_CONCURRENT_DOWNLOADS=6
-TMP_ARIA2_INPUT="$(mktemp)"
-TMP_DIRS="$(mktemp)"
-
-if [[ "$INPUT" =~ ^https?:// ]]; then
-  echo "$INPUT" > "$TMP_ARIA2_INPUT.urltmp"
-  INPUT="$TMP_ARIA2_INPUT.urltmp"
-fi
-
-echo "Parsing URLs and preparing directories..."
-
-# Normalize output dir: remove trailing slash
+# Convert relative output directory to absolute or normalized path
 OUTPUT_DIR="${OUTPUT_DIR%/}"
 
-if [[ -z "$BASE_URL" ]]; then
-  # No base URL given, just use full URL paths relative to domain, preserving directory structure
+# 2. Rebuild the Aria2 Control Map via Perl (Environment-Safe)
+echo "📝 Step 1: Parsing relative paths and building directory configurations..."
+MAP_FILE="$TMP_DIR/aria2c_indexes.txt"
 
-  # We generate the list of directories in TMP_DIRS and aria2 input in TMP_ARIA2_INPUT
-  awk -v outdir="$OUTPUT_DIR" -v tmpdirs="$TMP_DIRS" '
-  BEGIN {FS="\n"}
-  !/^#/ && NF > 0 {
-    url=$0;
-    # Extract path after domain, before query string
-    match(url, /^https?:\/\/[^\/]+\/([^?]+)/, arr);
-    if (arr[1] == "") {
-      print "[Warning] Cannot parse URL path: " url > "/dev/stderr"
-      next
+export BASE_URL
+export OUTPUT_DIR
+export DEPTH="${DEPTH:-${KEEP_DEPTH:-}}"
+export CUT_DIRS="${CUT_DIRS:-${STRIP_COMPONENTS:-}}"
+
+LC_ALL=C perl -e '
+  use strict;
+  use warnings;
+
+  my $input_file = $ARGV[0];
+  my $base_url   = $ENV{"BASE_URL"} // "";
+  my $out_dir    = $ENV{"OUTPUT_DIR"} // "./output";
+  my $depth      = $ENV{"DEPTH"} // "";
+  my $cut_dirs   = $ENV{"CUT_DIRS"} // "";
+
+  $base_url =~ s|/+$|| if length($base_url);
+  $out_dir  =~ s|/+$|| if length($out_dir);
+
+  open(my $fh, "<", $input_file) or die "Cannot open $input_file: $!\n";
+  my @lines = <$fh>;
+  close($fh);
+
+  # Auto-detect common base URL prefix if base_url, depth, and cut_dirs are not specified
+  if (!length($base_url) && !length($depth) && !length($cut_dirs)) {
+    my @paths;
+    for my $line (@lines) {
+      my $u = $line;
+      $u =~ s/^\s+|\s+$//g;
+      next if $u =~ /^#/ || $u eq "";
+      if ($u =~ m{^(https?://[^/]+/(?:api/public/dl|api/dl|dl|share|s)/[^/]+)/}) {
+        $base_url = $1;
+        last;
+      }
+      my $clean = $u;
+      $clean =~ s/\?.*$//;
+      if ($clean =~ m{^(https?://[^/]+/.*/)[^/]+$}) {
+        push @paths, $1;
+      }
     }
-    path=arr[1]
-    # Build full output path
-    out_path = outdir "/" path
-    # Get directory path
-    cmd = "dirname \"" out_path "\""
-    cmd | getline dir_path
-    close(cmd)
-    print dir_path > tmpdirs
+    if (!length($base_url) && @paths) {
+      my $prefix = $paths[0];
+      for my $p (@paths[1..$#paths]) {
+        while (index($p, $prefix) != 0) {
+          $prefix =~ s|/[^/]+/?$|/|;
+          last if $prefix eq "" || $prefix =~ m{^https?://[^/]+/?$};
+        }
+      }
+      $prefix =~ s|/+$||;
+      if ($prefix =~ m{^https?://[^/]+/.+}) {
+        $base_url = $prefix;
+        warn "🔍 Auto-detected common base path: $base_url/\n";
+      }
+    }
+  }
 
-    print url "\n  out=" substr(out_path, length(dir_path)+2) "\n  dir=" dir_path
-  }' "$INPUT" >> "$TMP_ARIA2_INPUT"
+  for my $line (@lines) {
+    $line =~ s/^\s+|\s+$//g;
+    $line =~ s/\r$//;
+    next if $line =~ /^#/ || $line eq "";
 
+    my ($url, $rel_path);
+
+    if (length($base_url)) {
+      if ($line =~ m{^https?://}) {
+        if (index($line, $base_url) == 0) {
+          $url = $line;
+          $rel_path = substr($line, length($base_url));
+          $rel_path =~ s|^/+||;
+        } else {
+          warn "[WARNING] URL does not start with base-url, skipping: $line\n";
+          next;
+        }
+      } else {
+        $rel_path = $line;
+        $rel_path =~ s|^/+||;
+        $url = "$base_url/$rel_path";
+      }
+    } else {
+      $url = $line;
+      if ($url =~ m{^(https?://[^/]+/(?:api/public/dl|api/dl|dl|share|s)/[^/]+)/(.+)}) {
+        $rel_path = $2;
+      } elsif ($url =~ m{^https?://[^/]+/(.+)}) {
+        $rel_path = $1;
+      } else {
+        warn "[WARNING] Cannot parse line as full URL: \"$line\". If using relative paths, please specify base-url.\n";
+        next;
+      }
+    }
+
+    my $clean_path = $rel_path;
+    $clean_path =~ s/\?.*$//;
+
+    my ($dir_part, $file_part);
+    my @parts = split(m{/}, $clean_path);
+    $file_part = pop @parts // $clean_path;
+
+    if (length($depth) && $depth =~ /^\d+$/) {
+      if ($depth == 0) {
+        @parts = ();
+      } elsif (@parts >= $depth) {
+        @parts = @parts[@parts - $depth .. $#parts];
+      }
+    } elsif (length($cut_dirs) && $cut_dirs =~ /^\d+$/) {
+      if (@parts >= $cut_dirs) {
+        @parts = @parts[$cut_dirs .. $#parts];
+      } else {
+        @parts = ();
+      }
+    }
+
+    $dir_part = join("/", @parts);
+    my $dest_dir = length($dir_part) ? "$out_dir/$dir_part" : "$out_dir";
+    print "$url\n  dir=$dest_dir\n  out=$file_part\n";
+  }
+' "$INPUT_FILE" > "$MAP_FILE"
+
+TOTAL_MAP_LINES=$(wc -l < "$MAP_FILE")
+PARSED_COUNT=$((TOTAL_MAP_LINES / 3))
+echo "✅ Map file generated successfully ($PARSED_COUNT files, $TOTAL_MAP_LINES instruction lines)."
+
+if [[ "$PARSED_COUNT" -eq 0 ]]; then
+  echo "❌ Error: No valid URLs could be parsed from input."
+  exit 1
+fi
+
+# 3. Split the Master Map into Low-RAM blocks
+CHUNK_DIR="$TMP_DIR/chunks"
+mkdir -p "$CHUNK_DIR"
+
+if [[ "$TOTAL_MAP_LINES" -gt "$CHUNK_LINES" ]]; then
+  echo "✂️ Step 2: Slicing workload into low-RAM processing blocks ($CHUNK_SIZE items/chunk)..."
+  split -l "$CHUNK_LINES" "$MAP_FILE" "$CHUNK_DIR/chunk_"
 else
-  # base URL given: URLs in input should start with BASE_URL, paths constructed relative to base URL path
-
-  # Normalize base url: remove trailing slash
-  BASE_URL="${BASE_URL%/}"
-
-  awk -v baseurl="$BASE_URL" -v outdir="$OUTPUT_DIR" -v tmpdirs="$TMP_DIRS" '
-  BEGIN {FS="\n"}
-  !/^#/ && NF > 0 {
-    url=$0;
-    if (index(url, baseurl) != 1) {
-      print "[Warning] URL does not start with base-url, skipping: " url > "/dev/stderr"
-      next
-    }
-    rel_path = substr(url, length(baseurl)+2)  # +2 to skip the slash after baseurl
-
-    # Remove query string if any
-    sub(/\?.*$/, "", rel_path)
-
-    # Normalize rel_path to remove leading slash if any
-    if (substr(rel_path,1,1)=="/") rel_path=substr(rel_path,2)
-
-    out_path = outdir "/" rel_path
-
-    # Remove trailing slash from output dir and leading slash from rel_path already done above
-    # so no double slashes
-
-    # Get directory path
-    cmd = "dirname \"" out_path "\""
-    cmd | getline dir_path
-    close(cmd)
-    print dir_path > tmpdirs
-
-    print url "\n  out=" substr(out_path, length(dir_path)+2) "\n  dir=" dir_path
-  }' "$INPUT" >> "$TMP_ARIA2_INPUT"
+  cp "$MAP_FILE" "$CHUNK_DIR/chunk_00"
 fi
 
-echo "Creating directories..."
-sort -u "$TMP_DIRS" | xargs -P 8 -I{} mkdir -p "{}"
+CHUNK_COUNT=$(ls -1 "$CHUNK_DIR"/chunk_* 2>/dev/null | wc -l)
+echo "✅ Workload prepared in $CHUNK_COUNT chunk(s)."
 
-rm -f "$TMP_DIRS"
-
-if [[ -f "$TMP_ARIA2_INPUT.urltmp" ]]; then
-  rm -f "$TMP_ARIA2_INPUT.urltmp"
+# Configure concurrency and chunk behavior based on dataset size
+if [[ "$PARSED_COUNT" -eq 1 ]]; then
+  ACTIVE_THREADS=1
+  SPLIT_COUNT=4
+  DOWNLOAD_RESULT_OPT="default"
+else
+  ACTIVE_THREADS="$THREADS"
+  SPLIT_COUNT=1
+  DOWNLOAD_RESULT_OPT="hide"
 fi
 
-echo "Starting downloads with aria2c..."
+# 4. Sequential Loop Over Chunks using Aria2c
+echo "⚡ Step 3: Launching download loop..."
+echo "-----------------------------------------------------------------"
 
-aria2c --max-concurrent-downloads=$MAX_CONCURRENT_DOWNLOADS --split=1 --auto-file-renaming=false --allow-overwrite=true --retry-wait=3 --max-tries=3 -i "$TMP_ARIA2_INPUT"
+current_chunk=1
+for chunk in "$CHUNK_DIR"/chunk_*; do
+  [[ -e "$chunk" ]] || continue
+  if [[ "$PARSED_COUNT" -eq 1 ]]; then
+    echo "📦 Downloading single item with resume support (--continue=true)..."
+  else
+    echo "📦 Processing chunk [$current_chunk/$CHUNK_COUNT] with $ACTIVE_THREADS parallel threads..."
+  fi
 
-rm -f "$TMP_ARIA2_INPUT"
+  aria2c \
+    -i "$chunk" \
+    -j "$ACTIVE_THREADS" \
+    --split="$SPLIT_COUNT" \
+    -x "$SPLIT_COUNT" \
+    --min-split-size=1M \
+    --auto-file-renaming=false \
+    --allow-overwrite=true \
+    --continue=true \
+    --connect-timeout=10 \
+    --timeout=30 \
+    --max-tries="$MAX_TRIES" \
+    --retry-wait="$RETRY_WAIT" \
+    --console-log-level=warn \
+    --summary-interval=0 \
+    --download-result="$DOWNLOAD_RESULT_OPT"
 
-echo "All done."
+  echo "✅ Chunk [$current_chunk/$CHUNK_COUNT] completed."
+  echo "-----------------------------------------------------------------"
+  current_chunk=$((current_chunk + 1))
+done
+
+echo "================================================================="
+echo "🎉 SUCCESS: All $PARSED_COUNT files successfully processed!"
