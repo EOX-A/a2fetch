@@ -4,28 +4,33 @@ set -euo pipefail
 SCRIPT_NAME="a2fetch"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo ".")"
 
-# Determine target installation directory without requiring sudo
+# Determine target installation directory on macOS
 if [ -n "${INSTALL_DIR:-}" ]; then
   TARGET_DIR="$INSTALL_DIR"
-elif [ "${EUID:-$(id -u)}" -eq 0 ] || [ -w "/usr/local/bin" ]; then
+elif [ -d "/opt/homebrew/bin" ] && [ -w "/opt/homebrew/bin" ]; then
+  TARGET_DIR="/opt/homebrew/bin"
+elif [ -d "/usr/local/bin" ] && [ -w "/usr/local/bin" ]; then
   TARGET_DIR="/usr/local/bin"
 else
   TARGET_DIR="${HOME}/.local/bin"
 fi
 
 echo "================================================================="
-echo "📦 Installing $SCRIPT_NAME on Debian/Ubuntu to $TARGET_DIR"
+echo "🍎 Installing $SCRIPT_NAME on macOS to $TARGET_DIR"
 echo "================================================================="
 
-# Check / install dependencies for Debian/Ubuntu
+# Check / install dependencies on macOS
 if ! command -v aria2c &>/dev/null; then
   echo "⚠️  'aria2c' was not detected in PATH."
-  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    echo "Installing aria2 via apt-get..."
-    apt-get update && apt-get install -y aria2
+  if command -v brew &>/dev/null; then
+    echo "Installing aria2 via Homebrew..."
+    brew install aria2 || {
+      echo "⚠️  Failed to install aria2 automatically via brew."
+      echo "Please run manually: brew install aria2"
+    }
   else
-    echo "Please ensure 'aria2' is installed on your Debian/Ubuntu system:"
-    echo "  sudo apt update && sudo apt install -y aria2"
+    echo "Homebrew was not detected. Please install aria2 manually, e.g.:"
+    echo "  brew install aria2"
   fi
 fi
 
@@ -47,7 +52,7 @@ echo "✅ $SCRIPT_NAME installed successfully to $TARGET_DIR/$SCRIPT_NAME"
 if [[ ":$PATH:" != *":$TARGET_DIR:"* ]]; then
   echo
   echo "💡 NOTE: '$TARGET_DIR' is not in your current PATH."
-  echo "Add it to your shell configuration (e.g., ~/.bashrc or ~/.zshrc):"
+  echo "Add it to your shell configuration (e.g., ~/.zshrc or ~/.bash_profile):"
   echo "  export PATH=\"$TARGET_DIR:\$PATH\""
 else
   echo "You can now run '$SCRIPT_NAME' from anywhere in your shell!"
