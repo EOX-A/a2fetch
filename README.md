@@ -15,18 +15,16 @@ It is designed for simple use cases where large numbers of files need to be fetc
 
 ## Installation
 
-Clone the repository and ensure `aria2` is installed on your system:
-
-```bash
-git clone https://github.com/EOX-A/a2fetch.git
-cd a2fetch
-chmod +x a2fetch
-```
-
 ### Debian/Ubuntu Installation
 
+From a local clone:
 ```bash
 ./install-debian.sh
+```
+
+Or via direct one-liner:
+```bash
+curl -fsSL https://raw.githubusercontent.com/EOX-A/a2fetch/main/install-debian.sh | bash
 ```
 
 - If running as a regular user without write permissions to `/usr/local/bin`, it installs into `~/.local/bin/a2fetch`.
@@ -35,8 +33,14 @@ chmod +x a2fetch
 
 ### macOS Installation
 
+From a local clone:
 ```bash
 ./install-mac.sh
+```
+
+Or via direct one-liner:
+```bash
+curl -fsSL https://raw.githubusercontent.com/EOX-A/a2fetch/main/install-mac.sh | bash
 ```
 
 - Automatically installs `aria2` via Homebrew (`brew install aria2`) if not already present.
