@@ -364,7 +364,7 @@ else
   cp "$MAP_FILE" "$CHUNK_DIR/chunk_00"
 fi
 
-CHUNK_COUNT=$(ls -1 "$CHUNK_DIR"/chunk_* 2>/dev/null | wc -l)
+CHUNK_COUNT=$(find "$CHUNK_DIR" -maxdepth 1 -name "chunk_*" | wc -l)
 echo "✅ Workload prepared in $CHUNK_COUNT chunk(s)."
 
 # Configure concurrency and chunk behavior based on dataset size
